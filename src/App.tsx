@@ -19,6 +19,21 @@ export default function App() {
   const listContainerRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
+  // Deduplicate clips helper by id and content_hash
+  const deduplicateClips = useCallback((items: ClipItem[]): ClipItem[] => {
+    const seenIds = new Set<number>();
+    const seenHashes = new Set<string>();
+    const unique: ClipItem[] = [];
+    for (const item of items) {
+      if (!seenIds.has(item.id) && !seenHashes.has(item.content_hash)) {
+        seenIds.add(item.id);
+        seenHashes.add(item.content_hash);
+        unique.push(item);
+      }
+    }
+    return unique;
+  }, []);
+
   // Fetch clips from SQLite backend
   const loadClips = useCallback(async () => {
     try {
@@ -33,12 +48,13 @@ export default function App() {
         limit: 100,
       });
 
-      setClips(results);
-      setSelectedIndex((prev) => (results.length === 0 ? 0 : Math.min(prev, results.length - 1)));
+      const uniqueResults = deduplicateClips(results);
+      setClips(uniqueResults);
+      setSelectedIndex((prev) => (uniqueResults.length === 0 ? 0 : Math.min(prev, uniqueResults.length - 1)));
     } catch (err) {
       console.error('Failed to load clips:', err);
     }
-  }, [searchQuery, selectedFilter]);
+  }, [searchQuery, selectedFilter, deduplicateClips]);
 
   // Fetch app statistics for the filter pills
   const loadAppSummaries = useCallback(async () => {
@@ -62,7 +78,22 @@ export default function App() {
     let unlistenClipsCleared: (() => void) | undefined;
 
     const setupListeners = async () => {
-      unlistenClipUpdate = await listen<ClipItem>('clipboard-updated', () => {
+      unlistenClipUpdate = await listen<ClipItem>('clipboard-updated', (event) => {
+        const updatedClip = event.payload;
+        if (updatedClip) {
+          setClips((prev) => {
+            const remaining = prev.filter(
+              (c) => c.id !== updatedClip.id && c.content_hash !== updatedClip.content_hash
+            );
+            const matchesFilter =
+              selectedFilter === 'All' ||
+              (selectedFilter === 'Pinned' && updatedClip.is_pinned) ||
+              selectedFilter === updatedClip.source_app;
+
+            const nextList = matchesFilter ? [updatedClip, ...remaining] : remaining;
+            return deduplicateClips(nextList);
+          });
+        }
         loadClips();
         loadAppSummaries();
       });
@@ -79,7 +110,7 @@ export default function App() {
       if (unlistenClipUpdate) unlistenClipUpdate();
       if (unlistenClipsCleared) unlistenClipsCleared();
     };
-  }, [loadClips, loadAppSummaries]);
+  }, [loadClips, loadAppSummaries, selectedFilter, deduplicateClips]);
 
   // Selected clip
   const selectedClip = clips[selectedIndex] ?? null;

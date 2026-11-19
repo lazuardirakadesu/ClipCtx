@@ -33,8 +33,10 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let now = current_timestamp();
 
-        // Check if hash exists
-        let mut check_stmt = conn.prepare("SELECT id, is_pinned, created_at FROM clips WHERE content_hash = ?1")?;
+        // Check if hash exists anywhere in clips
+        let mut check_stmt = conn.prepare(
+            "SELECT id, is_pinned, created_at FROM clips WHERE content_hash = ?1 ORDER BY last_used_at DESC LIMIT 1",
+        )?;
         let existing = check_stmt
             .query_row(params![content_hash], |row| {
                 Ok((
@@ -63,25 +65,23 @@ impl Database {
                 last_used_at: now,
             })
         } else {
+            // Atomic UPSERT: if another event squeezed through, update instead of failing or creating duplicates
             conn.execute(
                 "INSERT INTO clips (content, content_hash, content_type, source_app, window_title, is_pinned, created_at, last_used_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
+                 ON CONFLICT(content_hash) DO UPDATE SET
+                     last_used_at = excluded.last_used_at,
+                     source_app = excluded.source_app,
+                     window_title = excluded.window_title",
                 params![content, content_hash, content_type.as_str(), source_app, window_title, now],
             )?;
 
-            let id = conn.last_insert_rowid();
-
-            Ok(ClipItem {
-                id,
-                content: content.to_string(),
-                content_hash: content_hash.to_string(),
-                content_type: content_type.clone(),
-                source_app: source_app.to_string(),
-                window_title: window_title.to_string(),
-                is_pinned: false,
-                created_at: now,
-                last_used_at: now,
-            })
+            let mut fetch_stmt = conn.prepare(
+                "SELECT id, content, content_hash, content_type, source_app, window_title, is_pinned, created_at, last_used_at
+                 FROM clips WHERE content_hash = ?1",
+            )?;
+            let clip = fetch_stmt.query_row(params![content_hash], row_to_clip)?;
+            Ok(clip)
         }
     }
 
@@ -264,7 +264,12 @@ fn init_tables(conn: &Connection) -> Result<()> {
             last_used_at INTEGER NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(content_hash);
+        -- Purge any duplicate rows from prior runs, keeping the latest entry for each content_hash
+        DELETE FROM clips WHERE id NOT IN (
+            SELECT MAX(id) FROM clips GROUP BY content_hash
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_clips_unique_hash ON clips(content_hash);
         CREATE INDEX IF NOT EXISTS idx_clips_last_used ON clips(last_used_at DESC);
         CREATE INDEX IF NOT EXISTS idx_clips_pinned ON clips(is_pinned, last_used_at DESC);
         CREATE INDEX IF NOT EXISTS idx_clips_source_app ON clips(source_app);

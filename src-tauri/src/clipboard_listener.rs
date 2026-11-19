@@ -5,9 +5,9 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, MAX_PATH, WPARAM};
@@ -22,6 +22,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
+
+struct ListenerState {
+    last_hash: Option<String>,
+    last_time: Option<Instant>,
+}
+
+static LISTENER_STATE: Mutex<ListenerState> = Mutex::new(ListenerState {
+    last_hash: None,
+    last_time: None,
+});
+static CLIPBOARD_PROCESSING_LOCK: Mutex<()> = Mutex::new(());
 
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -92,16 +103,10 @@ pub fn start_clipboard_listener(app_handle: AppHandle, db: Arc<Database>) {
 }
 
 fn handle_clipboard_update(app_handle: &AppHandle, db: &Arc<Database>) {
-    // 1. Context extraction: foreground window metadata
-    let (source_app, window_title) = get_foreground_context();
+    // 1. Serialize clipboard update processing to avoid in-flight race conditions
+    let _lock = CLIPBOARD_PROCESSING_LOCK.lock().unwrap();
 
-    // 2. Privacy guards
-    if is_private_context(&source_app, &window_title) {
-        println!("Ignoring clipboard content from private context: {} / {}", source_app, window_title);
-        return;
-    }
-
-    // 3. Read clipboard text with short retry loop (in case copied app still locks it)
+    // 2. Read clipboard text with short retry loop (in case copying app still locks it)
     let text = match read_clipboard_text_with_retry(3, Duration::from_millis(25)) {
         Some(t) => t,
         None => return,
@@ -112,19 +117,43 @@ fn handle_clipboard_update(app_handle: &AppHandle, db: &Arc<Database>) {
         return;
     }
 
-    // 4. Compute SHA-256 Hash
+    // 3. Compute SHA-256 Hash
     let mut hasher = Sha256::new();
     hasher.update(trimmed.as_bytes());
     let hash_result = hasher.finalize();
     let content_hash: String = hash_result.iter().map(|b| format!("{:02x}", b)).collect();
 
-    // 5. Smart Classification
+    // 4. In-Flight Guard & Cooldown:
+    // If the exact same content_hash arrives within 400ms, skip processing immediately.
+    {
+        let mut state = LISTENER_STATE.lock().unwrap();
+        let now = Instant::now();
+        if let (Some(last_h), Some(last_t)) = (&state.last_hash, state.last_time) {
+            if last_h == &content_hash && now.duration_since(last_t) < Duration::from_millis(400) {
+                // Ignore rapid burst duplicate event (e.g. Chrome writing multiple formats)
+                return;
+            }
+        }
+        state.last_hash = Some(content_hash.clone());
+        state.last_time = Some(now);
+    }
+
+    // 5. Context extraction: foreground window metadata
+    let (source_app, window_title) = get_foreground_context();
+
+    // 6. Privacy guards
+    if is_private_context(&source_app, &window_title) {
+        println!("Ignoring clipboard content from private context: {} / {}", source_app, window_title);
+        return;
+    }
+
+    // 7. Smart Classification
     let content_type = classify_content(trimmed);
 
-    // 6. Insert / Update in Database
+    // 8. Insert / Update in Database
     match db.insert_or_update(trimmed, &content_hash, &content_type, &source_app, &window_title) {
         Ok(clip_item) => {
-            // 7. Emit real-time event to Tauri frontend
+            // 9. Emit real-time event to Tauri frontend
             let _ = app_handle.emit("clipboard-updated", &clip_item);
         }
         Err(e) => {
