@@ -1,7 +1,8 @@
 import React from 'react';
 import { ClipItem } from '../types';
-import { Code, Braces, Palette, Link, FileText, Pin } from 'lucide-react';
+import { Code, Braces, Palette, Link, FileText, Pin, Image as ImageIcon } from 'lucide-react';
 import { formatRelativeTime, formatAppDisplayName } from '../utils/formatters';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 interface ClipListItemProps {
   clip: ClipItem;
@@ -28,13 +29,20 @@ export const ClipListItem: React.FC<ClipListItemProps> = ({
         return <Palette className="w-3.5 h-3.5 text-fuchsia-500 shrink-0" />;
       case 'url':
         return <Link className="w-3.5 h-3.5 text-blue-500 shrink-0" />;
+      case 'image':
+        return <ImageIcon className="w-3.5 h-3.5 text-cyan-500 shrink-0" />;
       default:
         return <FileText className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 shrink-0" />;
     }
   };
 
   const isColor = clip.content_type === 'color';
+  const isImage = clip.content_type === 'image';
   const cleanApp = formatAppDisplayName(clip.source_app);
+
+  const getFileName = (path: string) => {
+    return path.split('\\').pop()?.split('/').pop() ?? 'image.png';
+  };
 
   return (
     <div
@@ -79,21 +87,42 @@ export const ClipListItem: React.FC<ClipListItemProps> = ({
       </div>
 
       {/* Content Preview */}
-      <div className="flex items-center space-x-2">
-        {isColor && (
-          <div
-            className="w-3.5 h-3.5 rounded-full border border-black/10 dark:border-white/20 shrink-0 shadow-xs"
-            style={{ backgroundColor: clip.content.trim() }}
+      {isImage ? (
+        <div className="flex items-center space-x-2.5 mt-0.5">
+          <img
+            src={convertFileSrc(clip.content)}
+            alt="Screenshot preview"
+            className="w-12 h-9 rounded object-cover border border-black/10 dark:border-white/10 shrink-0 bg-black/5 dark:bg-white/5"
+            onError={(e) => {
+              (e.target as HTMLElement).style.display = 'none';
+            }}
           />
-        )}
-        <p
-          className={`text-xs text-zinc-800 dark:text-zinc-200 line-clamp-2 break-all ${
-            clip.content_type === 'code' || clip.content_type === 'json' ? 'font-code text-[11px]' : ''
-          }`}
-        >
-          {clip.content}
-        </p>
-      </div>
+          <div className="flex flex-col min-w-0">
+            <span className="text-xs font-medium text-zinc-800 dark:text-zinc-200">
+              Screenshot
+            </span>
+            <span className="text-[10px] text-zinc-400 font-code truncate max-w-[170px]" title={clip.content}>
+              {getFileName(clip.content)}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center space-x-2">
+          {isColor && (
+            <div
+              className="w-3.5 h-3.5 rounded-full border border-black/10 dark:border-white/20 shrink-0 shadow-xs"
+              style={{ backgroundColor: clip.content.trim() }}
+            />
+          )}
+          <p
+            className={`text-xs text-zinc-800 dark:text-zinc-200 line-clamp-2 break-all ${
+              clip.content_type === 'code' || clip.content_type === 'json' ? 'font-code text-[11px]' : ''
+            }`}
+          >
+            {clip.content}
+          </p>
+        </div>
+      )}
     </div>
   );
 };

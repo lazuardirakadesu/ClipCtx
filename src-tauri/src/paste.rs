@@ -1,3 +1,4 @@
+use crate::models::ContentType;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::thread::sleep;
@@ -31,10 +32,22 @@ pub fn record_foreground_window(my_window_hwnd: Option<HWND>) {
     }
 }
 
-pub fn restore_focus_and_paste(content: &str) -> Result<(), String> {
+pub fn restore_focus_and_paste(content: &str, content_type: &ContentType) -> Result<(), String> {
     // 1. Write content to clipboard using arboard
     let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("Clipboard error: {}", e))?;
-    clipboard.set_text(content).map_err(|e| format!("Failed to set text: {}", e))?;
+
+    if content_type == &ContentType::Image {
+        let img = image::open(content).map_err(|e| format!("Failed to read image file: {}", e))?;
+        let rgba = img.to_rgba8();
+        let img_data = arboard::ImageData {
+            width: rgba.width() as usize,
+            height: rgba.height() as usize,
+            bytes: std::borrow::Cow::Borrowed(&rgba),
+        };
+        clipboard.set_image(img_data).map_err(|e| format!("Failed to set image on clipboard: {}", e))?;
+    } else {
+        clipboard.set_text(content).map_err(|e| format!("Failed to set text: {}", e))?;
+    }
 
     // 2. Allow time for Tauri window to hide
     sleep(Duration::from_millis(50));

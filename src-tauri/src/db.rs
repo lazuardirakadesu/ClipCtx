@@ -217,12 +217,43 @@ impl Database {
 
     pub fn delete_clip(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+
+        // Check if clip is an image and remove file from disk
+        let mut check_stmt = conn.prepare("SELECT content, content_type FROM clips WHERE id = ?1")?;
+        let clip_info = check_stmt
+            .query_row(params![id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .ok();
+
+        if let Some((path_str, ct)) = clip_info {
+            if ct == "image" {
+                let p = std::path::Path::new(&path_str);
+                if p.exists() {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
+
         conn.execute("DELETE FROM clips WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     pub fn clear_unpinned(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
+
+        // Remove all unpinned image files from disk
+        if let Ok(mut stmt) = conn.prepare("SELECT content FROM clips WHERE is_pinned = 0 AND content_type = 'image'") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for path_str in rows.flatten() {
+                    let p = std::path::Path::new(&path_str);
+                    if p.exists() {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+            }
+        }
+
         let deleted = conn.execute("DELETE FROM clips WHERE is_pinned = 0", [])?;
         Ok(deleted)
     }

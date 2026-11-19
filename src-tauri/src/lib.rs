@@ -6,14 +6,24 @@ mod paste;
 mod tray;
 
 use db::Database;
-use models::{AppFilterItem, ClipItem};
-use std::sync::Arc;
+use models::{AppFilterItem, ClipItem, ContentType};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{Manager, State, WebviewWindow, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use windows::Win32::Foundation::HWND;
 
+static LAST_SHOWN_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
 struct AppState {
     db: Arc<Database>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ImageMetadata {
+    pub width: u32,
+    pub height: u32,
+    pub file_size: u64,
 }
 
 #[tauri::command]
@@ -66,7 +76,18 @@ fn copy_clip_only(state: State<AppState>, id: i64) -> Result<(), String> {
         .ok_or_else(|| "Clip not found".to_string())?;
 
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    clipboard.set_text(&clip.content).map_err(|e| e.to_string())?;
+    if clip.content_type == ContentType::Image {
+        let img = image::open(&clip.content).map_err(|e| format!("Failed to read image file: {}", e))?;
+        let rgba = img.to_rgba8();
+        let img_data = arboard::ImageData {
+            width: rgba.width() as usize,
+            height: rgba.height() as usize,
+            bytes: std::borrow::Cow::Borrowed(&rgba),
+        };
+        clipboard.set_image(img_data).map_err(|e| format!("Failed to set image on clipboard: {}", e))?;
+    } else {
+        clipboard.set_text(&clip.content).map_err(|e| e.to_string())?;
+    }
     let _ = state.db.touch_last_used(id);
     Ok(())
 }
@@ -86,9 +107,29 @@ fn paste_clip(window: WebviewWindow, state: State<AppState>, id: i64) -> Result<
     let _ = state.db.touch_last_used(id);
 
     // 3. Restore focus and send Ctrl+V
-    paste::restore_focus_and_paste(&clip.content)?;
+    paste::restore_focus_and_paste(&clip.content, &clip.content_type)?;
 
     Ok(())
+}
+
+#[tauri::command]
+fn get_image_metadata(path: String) -> Result<ImageMetadata, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("Image file not found".to_string());
+    }
+
+    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    let file_size = meta.len();
+
+    let reader = image::ImageReader::open(p).map_err(|e| e.to_string())?;
+    let dimensions = reader.into_dimensions().map_err(|e| e.to_string())?;
+
+    Ok(ImageMetadata {
+        width: dimensions.0,
+        height: dimensions.1,
+        file_size,
+    })
 }
 
 #[tauri::command]
@@ -98,12 +139,27 @@ fn hide_window(window: WebviewWindow) -> Result<(), String> {
 
 #[tauri::command]
 fn show_window(window: WebviewWindow) -> Result<(), String> {
-    let my_hwnd = get_window_hwnd(&window);
-    paste::record_foreground_window(my_hwnd);
-    window.show().map_err(|e| e.to_string())?;
-    window.unminimize().map_err(|e| e.to_string())?;
-    window.set_focus().map_err(|e| e.to_string())?;
+    show_and_focus_window(&window);
     Ok(())
+}
+
+pub fn show_and_focus_window(window: &WebviewWindow) {
+    let my_hwnd = get_window_hwnd(window);
+    paste::record_foreground_window(my_hwnd);
+    if let Ok(mut lock) = LAST_SHOWN_AT.lock() {
+        *lock = Some(Instant::now());
+    }
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
+pub fn toggle_window(window: &WebviewWindow) {
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+    } else {
+        show_and_focus_window(window);
+    }
 }
 
 fn get_window_hwnd(window: &WebviewWindow) -> Option<HWND> {
@@ -125,15 +181,7 @@ pub fn run() {
                 .with_handler(|app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         if let Some(window) = app.get_webview_window("main") {
-                            let my_hwnd = get_window_hwnd(&window);
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                paste::record_foreground_window(my_hwnd);
-                                let _ = window.show();
-                                let _ = window.unminimize();
-                                let _ = window.set_focus();
-                            }
+                            toggle_window(&window);
                         }
                     }
                 })
@@ -175,11 +223,25 @@ pub fn run() {
                     }
                 }
 
-                // Auto-hide when unfocused (blur)
+                // Auto-hide when unfocused (blur), ignoring events within 350ms of show
                 let win_clone = window.clone();
                 window.on_window_event(move |event| {
                     if let WindowEvent::Focused(false) = event {
-                        let _ = win_clone.hide();
+                        let recently_shown = {
+                            if let Ok(lock) = LAST_SHOWN_AT.lock() {
+                                if let Some(shown_time) = *lock {
+                                    shown_time.elapsed() < Duration::from_millis(350)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+
+                        if !recently_shown {
+                            let _ = win_clone.hide();
+                        }
                     }
                 });
             }
@@ -194,6 +256,7 @@ pub fn run() {
             get_apps_summary,
             copy_clip_only,
             paste_clip,
+            get_image_metadata,
             hide_window,
             show_window
         ])

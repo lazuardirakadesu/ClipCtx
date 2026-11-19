@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ClipItem } from '../types';
 import {
   Link,
@@ -9,6 +9,7 @@ import {
   ExternalLink,
   CornerDownLeft,
   Check,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   formatAppDisplayName,
@@ -16,6 +17,7 @@ import {
   tryFormatJson,
 } from '../utils/formatters';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 interface InspectorPreviewProps {
   clip: ClipItem | null;
@@ -23,6 +25,12 @@ interface InspectorPreviewProps {
   onCopy: () => void;
   onTogglePin: () => void;
   onDelete: () => void;
+}
+
+interface ImageMetadata {
+  width: number;
+  height: number;
+  file_size: number;
 }
 
 export const InspectorPreview: React.FC<InspectorPreviewProps> = ({
@@ -33,6 +41,17 @@ export const InspectorPreview: React.FC<InspectorPreviewProps> = ({
   onDelete,
 }) => {
   const [copied, setCopied] = useState(false);
+  const [imgMeta, setImgMeta] = useState<ImageMetadata | null>(null);
+
+  useEffect(() => {
+    if (clip && clip.content_type === 'image') {
+      invoke<ImageMetadata>('get_image_metadata', { path: clip.content })
+        .then(setImgMeta)
+        .catch(() => setImgMeta(null));
+    } else {
+      setImgMeta(null);
+    }
+  }, [clip]);
 
   if (!clip) {
     return (
@@ -54,8 +73,18 @@ export const InspectorPreview: React.FC<InspectorPreviewProps> = ({
     if (clip.content_type === 'url') {
       try {
         openUrl(clip.content.trim());
-      } catch (e) {
+      } catch {
         window.open(clip.content.trim(), '_blank');
+      }
+    }
+  };
+
+  const handleOpenImage = () => {
+    if (clip.content_type === 'image') {
+      try {
+        openUrl(clip.content);
+      } catch (e) {
+        console.error('Failed to open image file:', e);
       }
     }
   };
@@ -63,6 +92,12 @@ export const InspectorPreview: React.FC<InspectorPreviewProps> = ({
   const lines = clip.content.split('\n');
   const lineCount = lines.length;
   const charCount = clip.content.length;
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-white/30 dark:bg-zinc-900/30">
@@ -123,14 +158,21 @@ export const InspectorPreview: React.FC<InspectorPreviewProps> = ({
 
       {/* Main Preview Content */}
       <div className="flex-1 p-3 overflow-y-auto select-text text-sm">
-        {clip.content_type === 'color' ? (
+        {clip.content_type === 'image' ? (
+          <ImagePreview
+            content={clip.content}
+            meta={imgMeta}
+            onOpenImage={handleOpenImage}
+            onCopy={handleCopy}
+          />
+        ) : clip.content_type === 'color' ? (
           <ColorPreview content={clip.content} onCopyColor={handleCopy} />
         ) : clip.content_type === 'url' ? (
           <UrlPreview content={clip.content} onOpen={handleOpenLink} />
         ) : clip.content_type === 'json' ? (
           <JsonPreview content={clip.content} />
         ) : clip.content_type === 'code' ? (
-          <CodePreview content={clip.content} lines={lines} />
+          <CodePreview lines={lines} />
         ) : (
           <TextPreview content={clip.content} />
         )}
@@ -149,8 +191,12 @@ export const InspectorPreview: React.FC<InspectorPreviewProps> = ({
             </span>
           </div>
 
-          <span className="shrink-0 text-[10px] text-zinc-400">
-            {charCount} chars • {lineCount} {lineCount === 1 ? 'line' : 'lines'}
+          <span className="shrink-0 text-[10px] text-zinc-400 font-medium">
+            {clip.content_type === 'image' && imgMeta ? (
+              `${imgMeta.width} × ${imgMeta.height} px • ${formatFileSize(imgMeta.file_size)}`
+            ) : (
+              `${charCount} chars • ${lineCount} ${lineCount === 1 ? 'line' : 'lines'}`
+            )}
           </span>
         </div>
 
@@ -167,6 +213,76 @@ export const InspectorPreview: React.FC<InspectorPreviewProps> = ({
 };
 
 /* --- Sub-renderers for different content types --- */
+
+const ImagePreview: React.FC<{
+  content: string;
+  meta: ImageMetadata | null;
+  onOpenImage: () => void;
+  onCopy: () => void;
+}> = ({ content, meta, onOpenImage, onCopy }) => {
+  const imgSrc = convertFileSrc(content);
+  const fileName = content.split('\\').pop()?.split('/').pop() ?? 'screenshot.png';
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  return (
+    <div className="flex flex-col space-y-3">
+      {/* Header Info Banner */}
+      <div className="flex items-center justify-between p-2.5 rounded-lg border border-black/10 dark:border-white/10 bg-white/50 dark:bg-black/20 text-xs">
+        <div className="flex items-center space-x-2 min-w-0">
+          <ImageIcon className="w-4 h-4 text-cyan-500 shrink-0" />
+          <span className="font-medium text-zinc-800 dark:text-zinc-200 truncate" title={fileName}>
+            {fileName}
+          </span>
+          {meta && (
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-code bg-black/5 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 shrink-0">
+              {meta.width} × {meta.height}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center space-x-2 shrink-0">
+          {meta && (
+            <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+              {formatFileSize(meta.file_size)}
+            </span>
+          )}
+          <button
+            onClick={onOpenImage}
+            className="flex items-center space-x-1 text-xs text-[#0067C0] dark:text-[#4CC2FF] hover:underline cursor-pointer"
+            title="Open in Default Photo Viewer"
+          >
+            <span>Open</span>
+            <ExternalLink className="w-3 h-3" />
+          </button>
+        </div>
+      </div>
+
+      {/* Main Image Frame */}
+      <div
+        onClick={onCopy}
+        className="relative group rounded-xl border border-black/10 dark:border-white/10 overflow-hidden bg-black/5 dark:bg-black/40 flex items-center justify-center p-2 cursor-pointer shadow-inner min-h-[180px] max-h-[300px]"
+        title="Click to copy image"
+      >
+        <img
+          src={imgSrc}
+          alt="Clipboard screenshot"
+          className="max-h-[280px] max-w-full rounded-lg object-contain shadow-md transition-transform group-hover:scale-[1.01]"
+        />
+        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded-xl pointer-events-none">
+          <span className="px-3 py-1.5 rounded-lg bg-black/75 text-white text-xs font-medium shadow-lg flex items-center space-x-1.5">
+            <Copy className="w-3.5 h-3.5" />
+            <span>Click to Copy Image</span>
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const ColorPreview: React.FC<{ content: string; onCopyColor: () => void }> = ({ content, onCopyColor }) => {
   const trimmed = content.trim();
@@ -261,7 +377,7 @@ const JsonPreview: React.FC<{ content: string }> = ({ content }) => {
   );
 };
 
-const CodePreview: React.FC<{ content: string; lines: string[] }> = ({ lines }) => {
+const CodePreview: React.FC<{ lines: string[] }> = ({ lines }) => {
   return (
     <div className="rounded-lg p-3 bg-black/5 dark:bg-black/30 border border-black/5 dark:border-white/5 font-code text-[11px] leading-relaxed overflow-x-auto select-text">
       <table className="w-full border-collapse">

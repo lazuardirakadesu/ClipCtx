@@ -8,6 +8,7 @@ pub enum ContentType {
     Json,
     Url,
     Color,
+    Image,
 }
 
 impl ContentType {
@@ -18,6 +19,7 @@ impl ContentType {
             ContentType::Json => "json",
             ContentType::Url => "url",
             ContentType::Color => "color",
+            ContentType::Image => "image",
         }
     }
 
@@ -27,6 +29,7 @@ impl ContentType {
             "json" => ContentType::Json,
             "url" => ContentType::Url,
             "color" => ContentType::Color,
+            "image" => ContentType::Image,
             _ => ContentType::Text,
         }
     }

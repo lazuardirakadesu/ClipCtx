@@ -18,7 +18,9 @@ pub fn setup_system_tray(app: &AppHandle, db: Arc<Database>) -> Result<(), Box<d
         .tooltip("ClipCtx - Clipboard Manager")
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "open" => {
-                show_main_window(app);
+                if let Some(window) = app.get_webview_window("main") {
+                    crate::show_and_focus_window(&window);
+                }
             }
             "clear" => {
                 let _ = db.clear_unpinned();
@@ -36,18 +38,12 @@ pub fn setup_system_tray(app: &AppHandle, db: Arc<Database>) -> Result<(), Box<d
                 ..
             } = event
             {
-                show_main_window(tray.app_handle());
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    crate::toggle_window(&window);
+                }
             }
         })
         .build(app)?;
 
     Ok(())
-}
-
-pub fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
 }

@@ -1,4 +1,4 @@
-export type ContentType = 'text' | 'code' | 'json' | 'url' | 'color';
+export type ContentType = 'text' | 'code' | 'json' | 'url' | 'color' | 'image';
 
 export interface ClipItem {
   id: number;
