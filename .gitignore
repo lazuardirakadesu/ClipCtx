@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 src-tauri/target
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
 
 # Editor directories and files
 .vscode/*
